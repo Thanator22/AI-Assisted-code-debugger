@@ -1,89 +1,22 @@
-# -------------------------
-# Python virtual environment
-# -------------------------
+# Python virtual environments
 .venv/
 venv/
 env/
 
-# Python-generated cache files
+# Python-generated files
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Packaging and build output
-build/
-dist/
 *.egg-info/
-.eggs/
 
-# Test and coverage output
+# Test caches
 .pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-coverage.xml
 
-# Type checker and linter caches
-.mypy_cache/
-.ruff_cache/
-.pyright/
+# IDE configuration
+.vscode/
+.idea/
 
-# -------------------------
-# Java build output
-# -------------------------
+# Java-generated files
 target/
+build/
 out/
 *.class
-
-# Gradle-generated files
-.gradle/
-
-# Keep Gradle wrapper files committed.
-# Do not ignore gradle/wrapper/gradle-wrapper.jar.
-
-# -------------------------
-# IDE and editor files
-# -------------------------
-.idea/
-*.iml
-.vscode/
-.project
-.classpath
-.settings/
-
-# -------------------------
-# Secrets and environment variables
-# -------------------------
-.env
-.env.*
-!.env.example
-
-*.pem
-*.key
-
-# -------------------------
-# Runtime output
-# -------------------------
-*.log
-logs/
-runs/
-reports/
-
-# Temporary agent workspaces
-.repo-doctor/
-agent-workspace/
-sandbox-repos/
-
-# Temporary files
-*.tmp
-*.temp
-*.swp
-*.swo
-*~
-
-# -------------------------
-# Operating-system files
-# -------------------------
-.DS_Store
-Thumbs.db
-desktop.ini
