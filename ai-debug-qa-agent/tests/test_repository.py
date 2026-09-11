@@ -44,3 +44,55 @@ def test_rejects_directory_as_file(tmp_path: Path):
 
     with pytest.raises(RepositoryError):
         repository.read_file("src")
+def test_lists_repository_files(tmp_path: Path):
+    java_file = tmp_path / "src" / "App.java"
+    java_file.parent.mkdir()
+    java_file.write_text("class App {}", encoding="utf-8")
+
+    pom_file = tmp_path / "pom.xml"
+    pom_file.write_text("<project />", encoding="utf-8")
+
+    repository = Repository(tmp_path)
+
+    assert repository.list_files() == [
+        "pom.xml",
+        "src/App.java",
+    ]
+
+
+def test_filters_files_by_extension(tmp_path: Path):
+    java_file = tmp_path / "App.java"
+    java_file.write_text("class App {}", encoding="utf-8")
+
+    text_file = tmp_path / "notes.txt"
+    text_file.write_text("Notes", encoding="utf-8")
+
+    repository = Repository(tmp_path)
+
+    assert repository.list_files({".java"}) == ["App.java"]
+
+
+def test_ignores_generated_directories(tmp_path: Path):
+    source_file = tmp_path / "src" / "App.java"
+    source_file.parent.mkdir()
+    source_file.write_text("class App {}", encoding="utf-8")
+
+    generated_file = tmp_path / "target" / "App.class"
+    generated_file.parent.mkdir()
+    generated_file.write_bytes(b"compiled")
+
+    repository = Repository(tmp_path)
+
+    assert repository.list_files() == ["src/App.java"]
+
+
+def test_limits_number_of_files(tmp_path: Path):
+    for index in range(10):
+        (tmp_path / f"File{index}.java").write_text(
+            f"class File{index} {{}}",
+            encoding="utf-8",
+        )
+
+    repository = Repository(tmp_path)
+
+    assert len(repository.list_files(limit=3)) == 3

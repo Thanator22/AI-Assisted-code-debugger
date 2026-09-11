@@ -55,4 +55,27 @@ class Repository:
         except (OSError, UnicodeDecodeError) as e:
             raise RepositoryError(f"Failed to read file: {relative_path}") from e
         
+    def list_files(self, extensions: set[str] | None = None, limit: int = 500,) -> list[str]:
+            """
+            Return repository-relative file paths.    
+            If extensions is provided, only files with those extensions
+            should be included.
+            """
+            files = []
     
+            for path in self.root.rglob("*"):
+                relative_path = path.relative_to(self.root)
+                #Skip paths inside ignored directories.    
+                if any(part in IGNORED_DIRECTORIES for part in relative_path.parts):
+                    continue
+                #Skip anything that isn't a regular file.
+                if not path.is_file():
+                    continue
+                #If extensions was provided, check path.suffix.
+                if extensions is not None and path.suffix not in extensions:
+                    continue
+                #Add a portable string path to files.
+                files.append(str(relative_path.as_posix()))
+    
+            files.sort()
+            return files[:limit]
