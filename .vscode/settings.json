@@ -1,5 +1,0 @@
-{
-    "python.analysis.extraPaths": [
-        "./ai-debug-qa-agent/src"
-    ]
-}
