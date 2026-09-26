@@ -16,6 +16,7 @@
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>5.10.2</junit.version>
+        <repoDoctor.reportsDirectory>${project.build.directory}/surefire-reports</repoDoctor.reportsDirectory>
     </properties>
 
     <dependencies>
@@ -42,6 +43,9 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
+                <configuration>
+                    <reportsDirectory>${repoDoctor.reportsDirectory}</reportsDirectory>
+                </configuration>
             </plugin>
         </plugins>
     </build>

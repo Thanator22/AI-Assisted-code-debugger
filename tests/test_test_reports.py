@@ -4,7 +4,10 @@ from pathlib import Path
 from repo_doctor.tools.test_reports import (
     TestReport as Report,
     TestIssueKind as IssueKind,
+    ReportCollectionResult,
+    ReportCollectionStatus,
     parse_surefire_report,
+    collect_surefire_reports,
 )
 
 
@@ -108,3 +111,89 @@ def test_parses_failure_and_error_details(tmp_path: Path):
     assert error.kind is IssueKind.ERROR
     assert error.message == "Unavailable"
     assert error.exception_type == "IllegalStateException"
+    
+def test_available_collection_requires_report():
+        with pytest.raises(ValueError, match="requires a report"):
+            ReportCollectionResult(
+                status=ReportCollectionStatus.AVAILABLE,
+                report=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        ReportCollectionStatus.MISSING,
+        ReportCollectionStatus.INVALID,
+    ],
+)
+def test_unavailable_collection_rejects_report(status):
+    empty_report = Report(
+        total_tests=0,
+        failures=0,
+        errors=0,
+        skipped=0,
+        issues=(),
+    )
+
+    with pytest.raises(ValueError, match="cannot contain a report"):
+        ReportCollectionResult(
+            status=status,
+            report=empty_report,
+        )  
+def test_combines_reports(tmp_path: Path):
+    (tmp_path / "TEST-first.xml").write_text(
+        '<testsuite tests="2" failures="0" errors="0" skipped="0">'
+        '<testcase name="a" classname="First"/>'
+        '<testcase name="b" classname="First"/>'
+        '</testsuite>',
+        encoding="utf-8",
+    )
+    (tmp_path / "TEST-second.xml").write_text(
+        '<testsuite tests="1" failures="1" errors="0" skipped="0">'
+        '<testcase name="c" classname="Second">'
+        '<failure message="Mismatch" type="AssertionError"/>'
+        '</testcase>'
+        '</testsuite>',
+        encoding="utf-8",
+    )
+
+    result = collect_surefire_reports(tmp_path)
+
+    assert result.status is ReportCollectionStatus.AVAILABLE
+    assert result.report is not None
+    assert result.report.total_tests == 3
+    assert result.report.passed_tests == 2
+    assert result.report.failures == 1
+    assert len(result.report.issues) == 1
+    assert result.report.issues[0].test_name == "c"
+
+
+@pytest.mark.parametrize("directory_exists", [True, False])
+def test_reports_missing_xml(tmp_path: Path, directory_exists):
+    directory = tmp_path if directory_exists else tmp_path / "missing"
+
+    result = collect_surefire_reports(directory)
+
+    assert result.status is ReportCollectionStatus.MISSING
+    assert result.report is None
+
+
+def test_invalid_report_prevents_partial_aggregate(tmp_path: Path):
+    (tmp_path / "TEST-valid.xml").write_text(
+        '<testsuite tests="0" failures="0" errors="0" skipped="0"/>',
+        encoding="utf-8",
+    )
+    (tmp_path / "TEST-broken.xml").write_text(
+        "<testsuite",
+        encoding="utf-8",
+    )
+
+    result = collect_surefire_reports(tmp_path)
+
+    assert result.status is ReportCollectionStatus.INVALID
+    assert result.report is None
+    assert any(
+        "TEST-broken.xml" in message
+        for message in result.diagnostics
+    )

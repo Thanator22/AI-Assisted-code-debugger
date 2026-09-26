@@ -14,6 +14,7 @@ from repo_doctor.tools.build import (
     BuildSystem,
     detect_build_system,
 )
+from repo_doctor.tools.test_reports import ReportCollectionStatus
 def successful_command_result() -> CommandResult:
     return CommandResult(
         status=CommandStatus.SUCCESS,
@@ -116,16 +117,25 @@ def test_maven_runner_delegates_to_process_runner(
 
     result = runner.run_tests()
 
-    assert result is expected_result
+    assert result.execution is expected_result
+    assert result.report_directory.is_dir()
+
+    # The mock never runs Maven, so no reports are generated.
+    assert result.reports.status is ReportCollectionStatus.MISSING
+    assert result.reports.report is None
 
     fake_process_runner.run.assert_called_once_with(
         (
             "/tools/mvn",
             "--batch-mode",
             "--no-transfer-progress",
+            (
+                "-DrepoDoctor.reportsDirectory="
+                + str(result.report_directory)
+            ),
             "test",
         ),
-        working_directory=".",
+        working_directory=tmp_path.resolve(),
         timeout_seconds=45,
     )
 
@@ -173,3 +183,31 @@ def test_maven_runner_rejects_non_maven_project(
         match="requires a Maven project",
     ):
         MavenTestRunner(tmp_path)
+
+def test_maven_runs_use_separate_report_directories(tmp_path: Path):
+    (tmp_path / "pom.xml").write_text(
+        "<project/>",
+        encoding="utf-8",
+    )
+
+    fake_process_runner = Mock(spec=ProcessRunner)
+    fake_process_runner.run.return_value = successful_command_result()
+
+    runner = MavenTestRunner(
+        tmp_path,
+        process_runner=fake_process_runner,
+    )
+
+    first = runner.run_tests()
+
+    # Simulate a report left behind by the first execution.
+    (first.report_directory / "TEST-old.xml").write_text(
+        '<testsuite tests="0" failures="0" errors="0" skipped="0"/>',
+        encoding="utf-8",
+    )
+
+    second = runner.run_tests()
+
+    assert first.report_directory != second.report_directory
+    assert second.reports.status is ReportCollectionStatus.MISSING
+    assert second.reports.report is None

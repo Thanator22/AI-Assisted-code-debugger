@@ -2,10 +2,16 @@ from enum import Enum
 import os
 import shutil
 from pathlib import Path
+from dataclasses import dataclass
+from tempfile import mkdtemp
 
 from repo_doctor.tools.process import (
     CommandResult,
     ProcessRunner,
+)
+from repo_doctor.tools.test_reports import (
+    ReportCollectionResult,
+    collect_surefire_reports,
 )
 
 
@@ -44,6 +50,12 @@ def detect_build_system(project_root: Path) -> BuildSystem:
         return BuildSystem.GRADLE
 
     return BuildSystem.UNKNOWN
+
+@dataclass(frozen=True)
+class MavenTestResult:
+    execution: CommandResult
+    reports: ReportCollectionResult
+    report_directory: Path
 
 class MavenTestRunner:
     def __init__(
@@ -89,18 +101,39 @@ class MavenTestRunner:
 
         return shutil.which("mvn") or "mvn"
 
-    def run_tests(self) -> CommandResult:
+    def run_tests(self) -> MavenTestResult:
+        runs_directory = (
+        self.project_root / "target" / "repo-doctor-runs"
+        )
+        runs_directory.mkdir(parents=True, exist_ok=True)
+
+        report_directory = Path(
+            mkdtemp(prefix="run-", dir=runs_directory)
+        )
+
         executable = self._resolve_maven_executable()
 
         command = (
             executable,
             "--batch-mode",
             "--no-transfer-progress",
+            (
+                "-DrepoDoctor.reportsDirectory="
+                + str(report_directory)
+            ),
             "test",
         )
 
-        return self.process_runner.run(
+        execution = self.process_runner.run(
             command,
-            working_directory=".",
+            working_directory=self.project_root,
             timeout_seconds=self.timeout_seconds,
+        )
+
+        reports = collect_surefire_reports(report_directory)
+
+        return MavenTestResult(
+            execution=execution,
+            reports=reports,
+            report_directory=report_directory,
         )

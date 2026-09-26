@@ -101,3 +101,91 @@ def parse_surefire_report(report_path: Path) -> TestReport:
         skipped=read_count("skipped"),
         issues=tuple(issues),
     )
+class ReportCollectionStatus(str, Enum):
+    AVAILABLE = "available"
+    MISSING = "missing"
+    INVALID = "invalid"
+
+
+@dataclass(frozen=True)
+class ReportCollectionResult:
+    status: ReportCollectionStatus
+    report: TestReport | None
+    diagnostics: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.status is ReportCollectionStatus.AVAILABLE:
+            if self.report is None:
+                raise ValueError(
+                    "Available report collection requires a report"
+                )
+        elif self.report is not None:
+            raise ValueError(
+                "Missing or invalid report collection cannot contain a report"
+            )
+def collect_surefire_reports(
+    report_directory: Path,
+) -> ReportCollectionResult:
+    try:
+        entries = list(report_directory.iterdir())
+    except FileNotFoundError:
+        return ReportCollectionResult(
+            status=ReportCollectionStatus.MISSING,
+            report=None,
+            diagnostics=("Report directory does not exist.",),
+        )
+    except OSError as error:
+        return ReportCollectionResult(
+            status=ReportCollectionStatus.INVALID,
+            report=None,
+            diagnostics=(f"Cannot read report directory: {error}",),
+        )
+
+    report_paths = sorted(
+        path
+        for path in entries
+        if path.name.startswith("TEST-")
+        and path.name.endswith(".xml")
+    )
+
+    if not report_paths:
+        return ReportCollectionResult(
+            status=ReportCollectionStatus.MISSING,
+            report=None,
+            diagnostics=("No test report XML files were found.",),
+        )
+
+    reports: list[TestReport] = []
+    diagnostics: list[str] = []
+
+    for path in report_paths:
+        try:
+            reports.append(parse_surefire_report(path))
+        except (OSError, ET.ParseError, ValueError, KeyError) as error:
+            diagnostics.append(
+                f"{path.name}: {type(error).__name__}: {error}"
+            )
+
+    if diagnostics:
+        return ReportCollectionResult(
+            status=ReportCollectionStatus.INVALID,
+            report=None,
+            diagnostics=tuple(diagnostics),
+        )
+
+    aggregate = TestReport(
+        total_tests=sum(report.total_tests for report in reports),
+        failures=sum(report.failures for report in reports),
+        errors=sum(report.errors for report in reports),
+        skipped=sum(report.skipped for report in reports),
+        issues=tuple(
+            issue
+            for report in reports
+            for issue in report.issues
+        ),
+    )
+
+    return ReportCollectionResult(
+        status=ReportCollectionStatus.AVAILABLE,
+        report=aggregate,
+    )
