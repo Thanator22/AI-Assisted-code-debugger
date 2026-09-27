@@ -7,10 +7,12 @@ from tempfile import mkdtemp
 
 from repo_doctor.tools.process import (
     CommandResult,
+    CommandStatus,
     ProcessRunner,
 )
 from repo_doctor.tools.test_reports import (
     ReportCollectionResult,
+    ReportCollectionStatus,
     collect_surefire_reports,
 )
 
@@ -56,6 +58,49 @@ class MavenTestResult:
     execution: CommandResult
     reports: ReportCollectionResult
     report_directory: Path
+    
+class TestRunOutcome(str, Enum):
+    PASSED = "passed"
+    TESTS_FAILED = "tests_failed"
+    BUILD_FAILED = "build_failed"
+    INCOMPLETE = "incomplete"
+    EXECUTION_FAILED = "execution_failed"
+    REPORTS_UNAVAILABLE = "reports_unavailable"
+    NO_TESTS_EXECUTED = "no_tests_executed"
+
+
+def classify_test_run(result: MavenTestResult) -> TestRunOutcome:
+    execution = result.execution
+    collection = result.reports
+
+    if execution.status is CommandStatus.TIMED_OUT:
+        return TestRunOutcome.INCOMPLETE
+
+    if execution.status not in (
+        CommandStatus.SUCCESS,
+        CommandStatus.NON_ZERO_EXIT,
+    ):
+        return TestRunOutcome.EXECUTION_FAILED
+
+    if collection.status is not ReportCollectionStatus.AVAILABLE:
+        if execution.status is CommandStatus.NON_ZERO_EXIT:
+            return TestRunOutcome.BUILD_FAILED
+
+        return TestRunOutcome.REPORTS_UNAVAILABLE
+
+    report = collection.report
+    assert report is not None  # Enforced by ReportCollectionResult
+
+    if report.failures > 0 or report.errors > 0:
+        return TestRunOutcome.TESTS_FAILED
+
+    if execution.status is CommandStatus.NON_ZERO_EXIT:
+        return TestRunOutcome.BUILD_FAILED
+
+    if report.executed_tests == 0:
+        return TestRunOutcome.NO_TESTS_EXECUTED
+
+    return TestRunOutcome.PASSED
 
 class MavenTestRunner:
     def __init__(
