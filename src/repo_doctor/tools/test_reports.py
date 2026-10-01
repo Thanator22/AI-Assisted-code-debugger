@@ -18,6 +18,18 @@ class TestIssue:
     exception_type: str
     stack_trace: str
 
+class TestCaseStatus(str, Enum):
+    PASSED = "passed"
+    FAILED = "failed"
+    ERROR = "error"
+    SKIPPED = "skipped"
+
+
+@dataclass(frozen=True)
+class TestCaseResult:
+    class_name: str
+    test_name: str
+    status: TestCaseStatus
 
 @dataclass(frozen=True)
 class TestReport:
@@ -26,6 +38,7 @@ class TestReport:
     errors: int
     skipped: int
     issues: tuple[TestIssue, ...]
+    test_cases: tuple[TestCaseResult, ...]
 
     def __post_init__(self) -> None:
         counts = (
@@ -73,8 +86,40 @@ def parse_surefire_report(report_path: Path) -> TestReport:
         return int(value)
 
     issues: list[TestIssue] = []
+    test_cases: list[TestCaseResult] = []
 
     for testcase in root.findall("testcase"):
+        class_name = testcase.attrib["classname"]
+        test_name = testcase.attrib["name"]
+
+        has_failure = testcase.find("failure") is not None
+        has_error = testcase.find("error") is not None
+        has_skipped = testcase.find("skipped") is not None
+
+        if sum((has_failure, has_error, has_skipped)) > 1:
+            raise ValueError(
+                f"Conflicting test outcomes: {class_name}.{test_name}"
+            )
+
+        if has_failure:
+            case_status = TestCaseStatus.FAILED
+        elif has_error:
+            case_status = TestCaseStatus.ERROR
+        elif has_skipped:
+            case_status = TestCaseStatus.SKIPPED
+        else:
+            case_status = TestCaseStatus.PASSED
+
+        # Record every testcase, including those with no child elements.
+        test_cases.append(
+            TestCaseResult(
+                class_name=class_name,
+                test_name=test_name,
+                status=case_status,
+            )
+        )
+
+        # Separately collect details for failures and errors.
         for child in testcase:
             if child.tag == "failure":
                 kind = TestIssueKind.FAILURE
@@ -85,8 +130,8 @@ def parse_surefire_report(report_path: Path) -> TestReport:
 
             issues.append(
                 TestIssue(
-                    test_name=testcase.attrib["name"],
-                    class_name=testcase.attrib["classname"],
+                    test_name=test_name,
+                    class_name=class_name,
                     kind=kind,
                     message=child.get("message", ""),
                     exception_type=child.get("type", ""),
@@ -94,13 +139,19 @@ def parse_surefire_report(report_path: Path) -> TestReport:
                 )
             )
 
-    return TestReport(
-        total_tests=read_count("tests"),
-        failures=read_count("failures"),
-        errors=read_count("errors"),
-        skipped=read_count("skipped"),
-        issues=tuple(issues),
-    )
+    report = TestReport(
+    total_tests=read_count("tests"),
+    failures=read_count("failures"),
+    errors=read_count("errors"),
+    skipped=read_count("skipped"),
+    issues=tuple(issues),
+    test_cases=tuple(test_cases),
+)
+
+    validate_test_case_counts(report)
+    return report
+    
+    
 class ReportCollectionStatus(str, Enum):
     AVAILABLE = "available"
     MISSING = "missing"
@@ -183,9 +234,45 @@ def collect_surefire_reports(
             for report in reports
             for issue in report.issues
         ),
+        test_cases=tuple(
+            case
+            for report in reports
+            for case in report.test_cases
+        ),
     )
 
     return ReportCollectionResult(
         status=ReportCollectionStatus.AVAILABLE,
         report=aggregate,
     )
+    
+def validate_test_case_counts(report: TestReport) -> None:
+    observed = (
+        len(report.test_cases),
+        sum(
+            case.status is TestCaseStatus.FAILED
+            for case in report.test_cases
+        ),
+        sum(
+            case.status is TestCaseStatus.ERROR
+            for case in report.test_cases
+        ),
+        sum(
+            case.status is TestCaseStatus.SKIPPED
+            for case in report.test_cases
+        ),
+    )
+
+    declared = (
+        report.total_tests,
+        report.failures,
+        report.errors,
+        report.skipped,
+    )
+
+    if observed != declared:
+        raise ValueError(
+            "Testcase outcomes disagree with suite counts: "
+            f"declared={declared}, observed={observed} "
+            "(total, failures, errors, skipped)"
+        )

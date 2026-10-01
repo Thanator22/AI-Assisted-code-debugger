@@ -240,6 +240,7 @@ def test_classifies_timeout_with_two_passing_tests_as_incomplete():
             errors=0,
             skipped=0,
             issues=(),
+            test_cases=(),
         ),
     )
     result = MavenTestResult(
@@ -269,7 +270,8 @@ def test_classifies_build_failed_with_four_passing_tests_as_build_failed():
             errors=0,
             skipped=0,
             issues=(),
-        ),
+            test_cases=(),
+        )
     )
     result = MavenTestResult(
         execution=execution,
@@ -298,6 +300,7 @@ def test_classifies_success_with_tests_skipped_as_no_tests_executed():
             errors=0,
             skipped=4,
             issues=(),
+            test_cases=(),
         ),
     )
     result = MavenTestResult(
@@ -327,6 +330,7 @@ def test_classifies_success_with_four_passing_tests_as_passed():
             errors=0,
             skipped=0,
             issues=(),
+            test_cases=(),
         ),
     )
     result = MavenTestResult(
@@ -376,6 +380,7 @@ def test_reported_failure_prevents_passed_outcome(
             errors=0,
             skipped=0,
             issues=(issue,),
+            test_cases=(),
         ),
     )
 
