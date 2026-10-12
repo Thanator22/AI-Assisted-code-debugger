@@ -7,6 +7,11 @@ name = "repo-doctor"
 version = "0.1.0"
 description = "An AI-powered code debugging and QA agent"
 requires-python = ">=3.11"
+dependencies = [
+    "anthropic",
+    "github-copilot-sdk",
+    "openai-codex", 
+]
 
 [project.optional-dependencies]
 dev = [

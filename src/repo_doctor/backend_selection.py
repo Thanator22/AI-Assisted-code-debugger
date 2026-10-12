@@ -15,7 +15,7 @@ class Backend(str, Enum):
 BACKEND_LABELS = {
     Backend.COPILOT: "GitHub Copilot",
     Backend.CLAUDE: "Claude",
-    Backend.CODEX: "Codex",
+    Backend.CODEX: "ChatGPT / Codex",
 }
 
 
