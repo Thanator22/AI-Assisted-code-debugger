@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 from io import StringIO
 from stat import S_ISREG
+from hashlib import sha256
 
 IGNORED_DIRECTORIES = {
     ".git",
@@ -43,6 +44,7 @@ class FileReadResult:
     content: str
     truncated: bool
     diagnostic: str = ""
+    file_sha256: str | None = None
 
 class Repository:
     def __init__(
@@ -131,7 +133,14 @@ class Repository:
 
         def failure(status: FileReadStatus, diagnostic: str) -> FileReadResult:
             return FileReadResult(
-                status, str(relative_path), start_line, None, "", False, diagnostic
+                status=status,
+                relative_path=str(relative_path),
+                start_line=start_line,
+                end_line=None,
+                content="",
+                truncated=False,
+                file_sha256=None,
+                diagnostic=diagnostic
             )
 
         try:
@@ -180,8 +189,13 @@ class Repository:
                     break
 
         return FileReadResult(
-            FileReadStatus.SUCCESS, str(relative_path), start_line, last_line,
-            "".join(chunks), truncated,
+            status=FileReadStatus.SUCCESS,
+            relative_path=str(relative_path),
+            start_line=start_line,
+            end_line=last_line,
+            content="".join(chunks),
+            truncated=truncated,
+            file_sha256=sha256(data).hexdigest(),
         )
 
     def list_files(self, extensions: set[str] | None = None, limit: int = 500,) -> list[str]:

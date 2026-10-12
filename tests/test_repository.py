@@ -1,5 +1,7 @@
 from pathlib import Path
+from hashlib import sha256
 import pytest
+
 from repo_doctor.tools.repository import (
     FileReadStatus,
     Repository,
@@ -353,3 +355,37 @@ def test_read_lines_symlink_containment(tmp_path: Path):
     repository = Repository(root)
     assert repository.read_lines("internal-link.txt").content == "inside"
     assert repository.read_lines("external-link.txt").status == FileReadStatus.INVALID_PATH
+    
+
+def test_read_lines_hashes_full_file_bytes(tmp_path: Path):
+    data = b"first\r\nsecond\r\nthird\r\n"
+    (tmp_path / "file.txt").write_bytes(data)
+
+    result = Repository(tmp_path).read_lines("file.txt", 2, 2)
+
+    assert result.content == "second\r\n"
+    assert result.file_sha256 == sha256(data).hexdigest()
+    assert result.file_sha256 != sha256(
+        result.content.encode("utf-8")
+    ).hexdigest()
+
+
+def test_change_outside_excerpt_changes_file_hash(tmp_path: Path):
+    path = tmp_path / "file.txt"
+    path.write_bytes(b"unchanged\noriginal\n")
+
+    repository = Repository(tmp_path)
+    first = repository.read_lines("file.txt", 1, 1)
+
+    path.write_bytes(b"unchanged\nmodified\n")
+    second = repository.read_lines("file.txt", 1, 1)
+
+    assert first.content == second.content
+    assert first.file_sha256 != second.file_sha256
+
+
+def test_failed_read_has_no_file_hash(tmp_path: Path):
+    result = Repository(tmp_path).read_lines("missing.txt")
+
+    assert result.status is FileReadStatus.NOT_FOUND
+    assert result.file_sha256 is None

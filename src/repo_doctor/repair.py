@@ -2,6 +2,16 @@ from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
+from collections.abc import Callable
+
+from repo_doctor.diagnosis import (
+    DiagnosisInput,
+    DiagnosisInputError,
+    ProposalValidationError,
+    RepairProposal,
+    build_diagnosis_input,
+    create_replacement_request,
+)
 
 from repo_doctor.tools.workspace import RepairWorkspace
 from repo_doctor.tools.test_reports import (
@@ -30,6 +40,8 @@ class RepairAttemptStatus(str, Enum):
     VERIFICATION_FAILED = "verification_failed"
     INTEGRITY_FAILED = "integrity_failed"
     VERIFIED = "verified"
+    DIAGNOSIS_FAILED = "diagnosis_failed"
+    PROPOSAL_FAILED = "proposal_failed"
 
 
 @dataclass(frozen=True)
@@ -100,17 +112,42 @@ def _snapshot_fixture_inputs(root: Path) -> dict[str, str]:
     
 def run_fixture_repair(
     workspace: RepairWorkspace,
-    request: ReplacementRequest,
+    request: ReplacementRequest | None,
     allowed_files: set[str],
     required_tests: tuple[RequiredTest, ...],
+    *,
+    propose_fix: Callable[[DiagnosisInput], RepairProposal] | None = None,
+    production_path: str | None = None,
+    test_path: str | None = None,
 ) -> RepairAttemptResult:
     if not required_tests:
         raise ValueError("At least one required test must be specified")
+    if (request is None) == (propose_fix is None):
+        raise ValueError(
+            "Provide exactly one of request or propose_fix"
+        )
+
+    if propose_fix is not None:
+        if not production_path or not test_path:
+            raise ValueError(
+                "Proposal generation requires production_path and test_path"
+            )
 
     # Construct before execution to validate workspace separation.
     applier = PatchApplier(workspace, allowed_files=allowed_files)
-    runner = MavenTestRunner(workspace.project_root)
+    if propose_fix is not None:
+        approved_paths = {
+            applier.repository.resolve_path(path)
+            for path in allowed_files
+        }
+        target = applier.repository.resolve_path(production_path)
 
+        if target not in approved_paths:
+            raise ValueError(
+                "Diagnosis production file must be approved for repair"
+            )
+    
+    runner = MavenTestRunner(workspace.project_root)
     original_inputs = _snapshot_fixture_inputs(workspace.source_root)
     workspace_inputs = _snapshot_fixture_inputs(workspace.project_root)
 
@@ -125,6 +162,7 @@ def run_fixture_repair(
         expected_inputs = dict(workspace_inputs)
 
         if patch is not None and patch.status is PatchStatus.APPLIED:
+            assert request is not None
             target = applier.repository.resolve_path(request.relative_path)
             key = target.relative_to(applier.repository.root).as_posix()
             expected_inputs[key] = patch.after_sha256
@@ -211,7 +249,74 @@ def run_fixture_repair(
     if baseline_check.status is RepairAttemptStatus.INTEGRITY_FAILED:
         return baseline_check
 
-    # Gate 2: apply the caller's proposal without refreshing its hash.
+    if propose_fix is not None:
+        # Use the first required failure as the diagnosis focus.
+        # All required tests still participate in verification.
+        focus = required_tests[0]
+        matching_issues = [
+            issue
+            for issue in baseline_report.issues
+            if issue.class_name == focus.class_name
+            and issue.test_name == focus.test_name
+        ]
+
+        if len(matching_issues) != 1:
+            return finish(
+                RepairAttemptStatus.DIAGNOSIS_FAILED,
+                ("Diagnosis requires one matching failure detail",),
+            )
+
+        assert production_path is not None
+        assert test_path is not None
+
+        try:
+            diagnosis = build_diagnosis_input(
+                applier.repository,
+                matching_issues[0],
+                production_path,
+                test_path,
+            )
+        except DiagnosisInputError as error:
+            return finish(
+                RepairAttemptStatus.DIAGNOSIS_FAILED,
+                (str(error),),
+            )
+
+        # Stop if evidence collection coincided with an input change.
+        diagnosis_check = finish(RepairAttemptStatus.DIAGNOSIS_FAILED)
+        if diagnosis_check.status is RepairAttemptStatus.INTEGRITY_FAILED:
+            return diagnosis_check
+
+        try:
+            proposal = propose_fix(diagnosis)
+        except Exception as error:
+            # A failed proposer must still pass through integrity checking.
+            return finish(
+                RepairAttemptStatus.PROPOSAL_FAILED,
+                (f"Proposal generation failed: {type(error).__name__}",),
+            )
+
+        # The proposer should return data without modifying fixture inputs.
+        proposal_check = finish(RepairAttemptStatus.PROPOSAL_FAILED)
+        if proposal_check.status is RepairAttemptStatus.INTEGRITY_FAILED:
+            return proposal_check
+
+        if not isinstance(proposal, RepairProposal):
+            return finish(
+                RepairAttemptStatus.PROPOSAL_FAILED,
+                ("Proposer did not return a RepairProposal",),
+            )
+
+        try:
+            request = create_replacement_request(diagnosis, proposal)
+        except ProposalValidationError as error:
+            return finish(
+                RepairAttemptStatus.PROPOSAL_FAILED,
+                (str(error),),
+            )
+
+    # Gate 2: apply the proposal using its captured file hash.
+    assert request is not None
     patch = applier.apply(request)
 
     if patch.status is not PatchStatus.APPLIED:
