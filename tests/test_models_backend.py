@@ -36,6 +36,18 @@ def configured_adapter(monkeypatch):
     monkeypatch.setattr("repo_doctor.models_backend.Anthropic", factory)
 
     adapter = ClaudeAdapter()
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    monkeypatch.setattr(
+        "repo_doctor.models_backend.load_saved_key",
+        lambda backend: None,
+    )
+
+    # Prevent tests from overwriting your actual saved credentials.
+    monkeypatch.setattr(
+        "repo_doctor.models_backend.save_key",
+        Mock(),
+    )
     adapter.ensure_authenticated()
 
     yield adapter, client, read_key, factory
@@ -45,7 +57,6 @@ def configured_adapter(monkeypatch):
 
 def test_authentication_reuses_client(configured_adapter):
     adapter, client, read_key, factory = configured_adapter
-
     adapter.ensure_authenticated()
 
     read_key.assert_called_once()
@@ -104,12 +115,21 @@ def test_rejects_unknown_model(configured_adapter):
 
 def test_empty_key_does_not_create_client(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    monkeypatch.setattr(
+        "repo_doctor.models_backend.load_saved_key",
+        lambda backend: None,
+    )
     monkeypatch.setattr(
         "repo_doctor.models_backend.getpass",
         lambda prompt: "",
     )
+
     factory = Mock()
-    monkeypatch.setattr("repo_doctor.models_backend.Anthropic", factory)
+    monkeypatch.setattr(
+        "repo_doctor.models_backend.Anthropic",
+        factory,
+    )
 
     with pytest.raises(ClaudeBackendError, match="key is required"):
         ClaudeAdapter().ensure_authenticated()

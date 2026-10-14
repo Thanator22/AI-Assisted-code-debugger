@@ -2,6 +2,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
+import json
+import os
+from pathlib import Path
 
 from repo_doctor.model_proposer import ProposalPrompt
 
@@ -139,3 +142,65 @@ class BackendSelector:
         self.selection = selection
         self.transport = transport
         return selection
+    def restore(self, selection: ModelSelection) -> None:
+        adapter = self.adapters.get(selection.backend)
+        if adapter is None:
+            raise ValueError("Saved backend is not registered")
+
+        adapter.ensure_authenticated()
+
+        if selection.model_id not in {
+            model.id for model in adapter.list_models()
+        }:
+            raise ValueError("Saved model is no longer listed")
+
+        transport = adapter.create_transport(selection.model_id)
+
+        self.selection = selection
+        self.transport = transport
+    
+def app_data_directory() -> Path:
+    local_data = os.environ.get("LOCALAPPDATA")
+    base = Path(local_data) if local_data else Path.home() / ".local" / "share"
+    directory = base / "RepoDoctor"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def save_selection(selection: ModelSelection) -> None:
+    destination = app_data_directory() / "settings.json"
+    temporary = destination.with_suffix(".json.tmp")
+
+    payload = {
+        "backend": selection.backend.value,
+        "model_id": selection.model_id,
+    }
+
+    try:
+        temporary.write_text(
+            json.dumps(payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def load_selection() -> ModelSelection | None:
+    path = app_data_directory() / "settings.json"
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid saved selection")
+
+    backend = Backend(payload["backend"])
+    model_id = payload["model_id"]
+
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise ValueError("Invalid saved model")
+
+    return ModelSelection(backend=backend, model_id=model_id)

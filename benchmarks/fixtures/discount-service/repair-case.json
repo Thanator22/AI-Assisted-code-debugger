@@ -1,0 +1,10 @@
+{
+  "production_path": "src/main/java/com/example/discount/DiscountService.java",
+  "test_path": "src/test/java/com/example/discount/DiscountServiceTest.java",
+  "required_tests": [
+    {
+      "class_name": "com.example.discount.DiscountServiceTest",
+      "test_name": "appliesDiscountAtThreshold"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "production_path": "src/main/java/com/example/average/AverageService.java",
+  "test_path": "src/test/java/com/example/average/AverageServiceTest.java",
+  "required_tests": [
+    {
+      "class_name": "com.example.average.AverageServiceTest",
+      "test_name": "preservesPositiveFraction"
+    },
+    {
+      "class_name": "com.example.average.AverageServiceTest",
+      "test_name": "preservesNegativeFraction"
+    }
+  ]
+}

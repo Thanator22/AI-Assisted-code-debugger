@@ -2,6 +2,13 @@ from hashlib import sha256
 from unittest.mock import Mock
 
 import pytest
+import json
+
+from repo_doctor.backend_selection import Backend, ModelSelection
+from repo_doctor.repair_reporting import (
+    build_repair_report,
+    save_repair_report,
+)
 
 from repo_doctor.repair import (
     RepairAttemptStatus,
@@ -27,7 +34,6 @@ from repo_doctor.tools.test_reports import (
 from repo_doctor.tools.workspace import create_fixture_workspace
 from repo_doctor.diagnosis import RepairProposal
 
-
 RELATIVE = "src/main/java/Example.java"
 TEST_RELATIVE = "src/test/java/ExampleTest.java"
 REQUIRED = RequiredTest("ExampleTest", "boundary")
@@ -47,7 +53,7 @@ def repair_setup(tmp_path):
         "Include the threshold",
         encoding="utf-8",
     )
-    
+
     test_file = source / TEST_RELATIVE
     test_file.parent.mkdir(parents=True)
     test_file.write_text(
@@ -71,23 +77,23 @@ def maven_result(project_root, *, failed):
     case_status = CaseStatus.FAILED if failed else CaseStatus.PASSED
 
     issues = (
-        Issue(
-            test_name="boundary",
-            class_name="ExampleTest",
-            kind=IssueKind.FAILURE,
-            message="Expected true",
-            exception_type="AssertionError",
-            stack_trace="",
-        ),
-    ) if failed else ()
+        (
+            Issue(
+                test_name="boundary",
+                class_name="ExampleTest",
+                kind=IssueKind.FAILURE,
+                message="Expected true",
+                exception_type="AssertionError",
+                stack_trace="",
+            ),
+        )
+        if failed
+        else ()
+    )
 
     return MavenTestResult(
         execution=CommandResult(
-            status=(
-                CommandStatus.NON_ZERO_EXIT
-                if failed
-                else CommandStatus.SUCCESS
-            ),
+            status=(CommandStatus.NON_ZERO_EXIT if failed else CommandStatus.SUCCESS),
             command=("mvn", "test"),
             working_directory=str(project_root),
             exit_code=1 if failed else 0,
@@ -104,9 +110,7 @@ def maven_result(project_root, *, failed):
                 errors=0,
                 skipped=0,
                 issues=issues,
-                test_cases=(
-                    CaseResult("ExampleTest", "boundary", case_status),
-                ),
+                test_cases=(CaseResult("ExampleTest", "boundary", case_status),),
             ),
         ),
         report_directory=project_root / "target" / "mock-reports",
@@ -124,9 +128,8 @@ def install_fake_runner(monkeypatch, *results):
 
     return runner
 
-def test_rejected_baseline_never_calls_patcher(
-    repair_setup, monkeypatch
-):
+
+def test_rejected_baseline_never_calls_patcher(repair_setup, monkeypatch):
     workspace, request = repair_setup
 
     runner = install_fake_runner(
@@ -134,9 +137,7 @@ def test_rejected_baseline_never_calls_patcher(
         maven_result(workspace.project_root, failed=False),
     )
 
-    apply = Mock(
-        side_effect=AssertionError("Patcher must not be called")
-    )
+    apply = Mock(side_effect=AssertionError("Patcher must not be called"))
     monkeypatch.setattr(PatchApplier, "apply", apply)
 
     result = run_fixture_repair(
@@ -153,9 +154,7 @@ def test_rejected_baseline_never_calls_patcher(
     assert runner.run_tests.call_count == 1
 
 
-def test_stale_patch_prevents_verification(
-    repair_setup, monkeypatch
-):
+def test_stale_patch_prevents_verification(repair_setup, monkeypatch):
     workspace, request = repair_setup
 
     stale_request = ReplacementRequest(
@@ -184,9 +183,7 @@ def test_stale_patch_prevents_verification(
     assert (workspace.project_root / RELATIVE).read_bytes() == BEFORE
 
 
-def test_valid_attempt_applies_patch_and_verifies(
-    repair_setup, monkeypatch
-):
+def test_valid_attempt_applies_patch_and_verifies(repair_setup, monkeypatch):
     workspace, request = repair_setup
 
     runner = install_fake_runner(
@@ -209,7 +206,8 @@ def test_valid_attempt_applies_patch_and_verifies(
     assert runner.run_tests.call_count == 2
     assert (workspace.project_root / RELATIVE).read_bytes() == AFTER
     assert (workspace.source_root / RELATIVE).read_bytes() == BEFORE
-    
+
+
 def known_proposal(diagnosis):
     return RepairProposal(
         explanation="The bulk threshold includes equality.",
@@ -218,9 +216,7 @@ def known_proposal(diagnosis):
     )
 
 
-def test_proposer_runs_after_baseline_and_repair_is_verified(
-    repair_setup, monkeypatch
-):
+def test_proposer_runs_after_baseline_and_repair_is_verified(repair_setup, monkeypatch):
     workspace, _ = repair_setup
     runner = install_fake_runner(
         monkeypatch,
@@ -235,9 +231,7 @@ def test_proposer_runs_after_baseline_and_repair_is_verified(
 
         assert diagnosis.failure.test_name == REQUIRED.test_name
         assert diagnosis.production_code.content == BEFORE.decode("utf-8")
-        assert diagnosis.production_code.file_sha256 == sha256(
-            BEFORE
-        ).hexdigest()
+        assert diagnosis.production_code.file_sha256 == sha256(BEFORE).hexdigest()
         assert diagnosis.test_code.relative_path == TEST_RELATIVE
 
         return known_proposal(diagnosis)
@@ -259,11 +253,32 @@ def test_proposer_runs_after_baseline_and_repair_is_verified(
     assert runner.run_tests.call_count == 2
     assert (workspace.project_root / RELATIVE).read_bytes() == AFTER
     assert (workspace.source_root / RELATIVE).read_bytes() == BEFORE
+    assert result.proposal is not None
+    assert result.proposal.old_text == "n > 10"
+    assert result.request is not None
+    assert result.request.expected_sha256 == sha256(BEFORE).hexdigest()
+    selection = ModelSelection(Backend.CODEX, "test-model")
+    report_path = save_repair_report(result, selection)
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+
+    assert payload["status"] == "verified"
+    assert payload["requested_model"] == "test-model"
+    assert payload["baseline"]["tests"]["failures"] == 1
+    assert payload["verification"]["tests"]["passed"] == 1
+    assert payload["diff"]["status"] == "available"
+    assert "-class Example" in payload["diff"]["content"]
+    assert "+class Example" in payload["diff"]["content"]
+    assert "\\ No newline at end of file" in payload["diff"]["content"]
+
+    # Later changes must not be presented as the verified patch.
+    (workspace.project_root / RELATIVE).write_bytes(AFTER + b"\n")
+
+    changed_report = build_repair_report(result, selection)
+    assert changed_report["diff"]["status"] == "unavailable"
+    assert changed_report["diff"]["content"] is None
 
 
-def test_rejected_baseline_never_calls_proposer(
-    repair_setup, monkeypatch
-):
+def test_rejected_baseline_never_calls_proposer(repair_setup, monkeypatch):
     workspace, _ = repair_setup
     runner = install_fake_runner(
         monkeypatch,
@@ -327,9 +342,7 @@ def test_proposer_input_changes_stop_repair(
     assert runner.run_tests.call_count == 1
 
 
-def test_unseen_replacement_stops_before_patching(
-    repair_setup, monkeypatch
-):
+def test_unseen_replacement_stops_before_patching(repair_setup, monkeypatch):
     workspace, _ = repair_setup
     runner = install_fake_runner(
         monkeypatch,
@@ -360,3 +373,71 @@ def test_unseen_replacement_stops_before_patching(
     apply.assert_not_called()
     assert result.verification is None
     assert runner.run_tests.call_count == 1
+
+
+def test_failed_verification_does_not_retry(repair_setup, monkeypatch):
+    workspace, _ = repair_setup
+    runner = install_fake_runner(
+        monkeypatch,
+        maven_result(workspace.project_root, failed=True),
+        maven_result(workspace.project_root, failed=True),
+    )
+    proposer = Mock(side_effect=known_proposal)
+
+    result = run_fixture_repair(
+        workspace,
+        request=None,
+        allowed_files={RELATIVE},
+        required_tests=(REQUIRED,),
+        propose_fix=proposer,
+        production_path=RELATIVE,
+        test_path=TEST_RELATIVE,
+    )
+
+    assert result.status is RepairAttemptStatus.VERIFICATION_FAILED
+    assert result.patch.status is PatchStatus.APPLIED
+    assert result.verification is not None
+    proposer.assert_called_once()
+    assert runner.run_tests.call_count == 2
+
+
+@pytest.mark.parametrize("change_during", ["baseline", "verification"])
+def test_runner_input_changes_fail_integrity(repair_setup, monkeypatch, change_during):
+    workspace, _ = repair_setup
+    runner = install_fake_runner(monkeypatch)
+    calls = 0
+
+    def run_tests():
+        nonlocal calls
+        calls += 1
+        stage = "baseline" if calls == 1 else "verification"
+        if stage == change_during:
+            (workspace.project_root / TEST_RELATIVE).write_text(
+                "// unauthorized test change", encoding="utf-8"
+            )
+        return maven_result(workspace.project_root, failed=calls == 1)
+
+    runner.run_tests.side_effect = run_tests
+    proposer = Mock(side_effect=known_proposal)
+    result = run_fixture_repair(
+        workspace,
+        request=None,
+        allowed_files={RELATIVE},
+        required_tests=(REQUIRED,),
+        propose_fix=proposer,
+        production_path=RELATIVE,
+        test_path=TEST_RELATIVE,
+    )
+
+    assert result.status is RepairAttemptStatus.INTEGRITY_FAILED
+    assert "Workspace inputs differ from the authorized change" in result.diagnostics
+    if change_during == "baseline":
+        proposer.assert_not_called()
+        assert result.patch is None
+        assert result.verification is None
+        assert calls == 1
+    else:
+        proposer.assert_called_once()
+        assert result.patch.status is PatchStatus.APPLIED
+        assert result.verification is not None
+        assert calls == 2

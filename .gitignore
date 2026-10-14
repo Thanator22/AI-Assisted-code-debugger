@@ -20,3 +20,5 @@ target/
 build/
 out/
 *.class
+
+benchmarks/results/

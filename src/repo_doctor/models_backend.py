@@ -18,7 +18,22 @@ from repo_doctor.backend_selection import (
 )
 from repo_doctor.model_proposer import ProposalPrompt
 from repo_doctor.proposals import MAX_RESPONSE_CHARACTERS
-from repo_doctor.backend_selection import ModelOption, Transport
+from repo_doctor.backend_selection import ModelOption, Transport, app_data_directory
+from keyring.backends.Windows import WinVaultKeyring
+
+
+def load_saved_key(name: str) -> str:
+    return WinVaultKeyring().get_password("RepoDoctor", name) or ""
+
+
+def save_key(name: str, value: str) -> None:
+    try:
+        WinVaultKeyring().set_password("RepoDoctor", name, value)
+    except Exception as error:
+        print(
+            "Authenticated, but could not save credentials: "
+            f"{type(error).__name__}"
+        )
 
 class ModelBackendError(RuntimeError):
     """Backend failure with a message suitable for display."""
@@ -55,7 +70,10 @@ class ClaudeAdapter:
         if self._client is not None:
             return
 
-        key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        key = (
+            os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            or load_saved_key("claude")
+        )
         if not key:
             key = getpass("Anthropic API key: ").strip()
 
@@ -90,6 +108,7 @@ class ClaudeAdapter:
 
         self._client = client
         self._models = models
+        save_key("claude", key)
 
     def list_models(self) -> tuple[ModelOption, ...]:
         if self._client is None:
@@ -183,6 +202,7 @@ class CopilotAdapter:
     def ensure_authenticated(self) -> None:
         if self._models:
             return
+        self._token = load_saved_key("copilot") or None
 
         try:
             models = asyncio.run(self._discover_models())
@@ -205,6 +225,8 @@ class CopilotAdapter:
                 )
 
             self._models = models
+            if self._token:
+                save_key("copilot", self._token)
         except ModelBackendError:
             self._token = None
             raise
@@ -280,9 +302,9 @@ class CodexAdapter:
 
         runtime = TemporaryDirectory(prefix="repo-doctor-codex-")
         root = Path(runtime.name)
-        codex_home = root / "codex-home"
+        codex_home = app_data_directory() / "codex"
         working_directory = root / "work"
-        codex_home.mkdir()
+        codex_home.mkdir(parents=True, exist_ok=True)
         working_directory.mkdir()
 
         # This environment applies only to the SDK's child runtime.
@@ -302,41 +324,40 @@ class CodexAdapter:
                         "features.unified_exec=false",
                         "features.apps=false",
                         "project_doc_max_bytes=0",
+                        'cli_auth_credentials_store="keyring"',
                     ),
                 )
             )
 
-            method = choose_number(
-                "Choose Codex authentication: ",
-                ["Sign in with ChatGPT", "Use an OpenAI API key"],
-            )
-
-            if method == 0:
-                login = client.login_chatgpt()
-                print("Complete sign-in in your browser:")
-                print(login.auth_url)
-                webbrowser.open(login.auth_url)
-
-                try:
-                    completed = login.wait()
-                except BaseException:
-                    login.cancel()
-                    raise
-
-                if not completed.success:
-                    raise ModelBackendError("ChatGPT sign-in failed")
-            else:
-                key = os.environ.get("OPENAI_API_KEY", "").strip()
-                if not key:
-                    key = getpass("OpenAI API key: ").strip()
-
-                if not key:
-                    raise ModelBackendError("An OpenAI API key is required")
-
-                client.login_api_key(key)
-
             if client.account().account is None:
-                raise ModelBackendError("Codex has no authenticated account")
+                method = choose_number(
+                    "Choose Codex authentication: ",
+                    ["Sign in with ChatGPT", "Use an OpenAI API key"],
+                )
+
+                if method == 0:
+                    login = client.login_chatgpt()
+                    print("Complete sign-in in your browser:")
+                    print(login.auth_url)
+                    webbrowser.open(login.auth_url)
+
+                    try:
+                        completed = login.wait()
+                    except BaseException:
+                        login.cancel()
+                        raise
+
+                    if not completed.success:
+                        raise ModelBackendError("ChatGPT sign-in failed")
+                else:
+                    key = os.environ.get("OPENAI_API_KEY", "").strip()
+                    if not key:
+                        key = getpass("OpenAI API key: ").strip()
+
+                    if not key:
+                        raise ModelBackendError("An OpenAI API key is required")
+
+                    client.login_api_key(key)
 
             catalog = client.models()
             models = tuple(
@@ -415,153 +436,3 @@ class CodexAdapter:
             if self._runtime is not None:
                 self._runtime.cleanup()
                 self._runtime = None
-                
-class CodexAdapter:
-    def __init__(self):
-        self._client: Codex | None = None
-        self._runtime: TemporaryDirectory | None = None
-        self._working_directory: str | None = None
-        self._models: tuple[ModelOption, ...] = ()
-
-    def ensure_authenticated(self) -> None:
-        if self._client is not None:
-            return
-
-        runtime = TemporaryDirectory(prefix="repo-doctor-codex-")
-        root = Path(runtime.name)
-        codex_home = root / "codex-home"
-        working_directory = root / "work"
-        codex_home.mkdir()
-        working_directory.mkdir()
-
-        # This environment applies only to the SDK's child runtime.
-        environment = dict(os.environ)
-        environment["CODEX_HOME"] = str(codex_home)
-
-        client = None
-
-        try:
-            client = Codex(
-                CodexConfig(
-                    cwd=str(working_directory),
-                    env=environment,
-                    config_overrides=(
-                        'web_search="disabled"',
-                        "features.shell_tool=false",
-                        "features.unified_exec=false",
-                        "features.apps=false",
-                        "project_doc_max_bytes=0",
-                    ),
-                )
-            )
-
-            method = choose_number(
-                "Choose Codex authentication: ",
-                ["Sign in with ChatGPT", "Use an OpenAI API key"],
-            )
-
-            if method == 0:
-                login = client.login_chatgpt()
-                print("Complete sign-in in your browser:")
-                print(login.auth_url)
-                webbrowser.open(login.auth_url)
-
-                try:
-                    completed = login.wait()
-                except BaseException:
-                    login.cancel()
-                    raise
-
-                if not completed.success:
-                    raise ModelBackendError("ChatGPT sign-in failed")
-            else:
-                key = os.environ.get("OPENAI_API_KEY", "").strip()
-                if not key:
-                    key = getpass("OpenAI API key: ").strip()
-
-                if not key:
-                    raise ModelBackendError("An OpenAI API key is required")
-
-                client.login_api_key(key)
-
-            if client.account().account is None:
-                raise ModelBackendError("Codex has no authenticated account")
-
-            catalog = client.models()
-            models = tuple(
-                ModelOption(model.model, model.display_name)
-                for model in catalog.data
-                if not model.hidden
-            )
-
-            if not models:
-                raise ModelBackendError("Codex returned no selectable models")
-
-            self._client = client
-            self._runtime = runtime
-            self._working_directory = str(working_directory)
-            self._models = models
-
-        except BaseException:
-            try:
-                if client is not None:
-                    client.close()
-            finally:
-                runtime.cleanup()
-            raise
-
-    def list_models(self) -> tuple[ModelOption, ...]:
-        if self._client is None:
-            raise ModelBackendError("Authenticate with Codex first")
-        return self._models
-
-    def create_transport(self, model_id: str) -> Transport:
-        _require_model(self._models, model_id)
-        client = self._client
-
-        if client is None:
-            raise ModelBackendError("Authenticate with Codex first")
-
-        def transport(prompt: ProposalPrompt) -> str:
-            if self._client is not client:
-                raise ModelBackendError("This Codex transport has been closed")
-
-            try:
-                thread = client.thread_start(
-                    model=model_id,
-                    cwd=self._working_directory,
-                    sandbox=Sandbox.read_only,
-                    approval_mode=ApprovalMode.deny_all,
-                    ephemeral=True,
-                    base_instructions=prompt.instructions,
-                )
-                result = thread.run(prompt.evidence)
-
-                if result.status != TurnStatus.completed:
-                    raise ModelBackendError(
-                        "Codex did not complete the proposal"
-                    )
-
-                return _validate_response(result.final_response)
-            except ModelBackendError:
-                raise
-            except Exception as error:
-                raise ModelBackendError(
-                    f"Codex request failed: {type(error).__name__}"
-                ) from None
-
-        return transport
-
-    def close(self) -> None:
-        try:
-            if self._client is not None:
-                self._client.close()
-        finally:
-            self._client = None
-            self._models = ()
-            self._working_directory = None
-
-            if self._runtime is not None:
-                self._runtime.cleanup()
-                self._runtime = None
-            

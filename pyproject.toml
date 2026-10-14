@@ -11,6 +11,8 @@ dependencies = [
     "anthropic",
     "github-copilot-sdk",
     "openai-codex", 
+    "keyring",
+    "langgraph>=1,<2",
 ]
 
 [project.optional-dependencies]

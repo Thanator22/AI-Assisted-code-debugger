@@ -11,14 +11,14 @@ from repo_doctor.diagnosis import (
     create_replacement_request,
 )
 from repo_doctor.tools.repository import Repository
-from repo_doctor.tools.test_reports import TestIssue, TestIssueKind
+from repo_doctor.tools.test_reports import TestIssue as Issue, TestIssueKind as IssueKind
 
 
-def make_issue(message: str = "expected 900 but was 1000") -> TestIssue:
-    return TestIssue(
+def make_issue(message: str = "expected 900 but was 1000") -> Issue:
+    return Issue(
         test_name="boundary",
         class_name="ExampleTest",
-        kind=TestIssueKind.FAILURE,
+        kind=IssueKind.FAILURE,
         message=message,
         exception_type="AssertionError",
         stack_trace="at ExampleTest.boundary(ExampleTest.java:10)",
