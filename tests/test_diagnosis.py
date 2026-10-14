@@ -6,12 +6,15 @@ from repo_doctor.diagnosis import (
     DiagnosisInputError,
     RepairProposal,
     ProposalValidationError,
-    RepairProposal,
     build_diagnosis_input,
+    build_discovered_diagnosis_input,
     create_replacement_request,
 )
 from repo_doctor.tools.repository import Repository
-from repo_doctor.tools.test_reports import TestIssue as Issue, TestIssueKind as IssueKind
+from repo_doctor.tools.test_reports import (
+    TestIssue as Issue,
+    TestIssueKind as IssueKind,
+)
 
 
 def make_issue(message: str = "expected 900 but was 1000") -> Issue:
@@ -31,9 +34,7 @@ def prepare_repository(tmp_path) -> Repository:
         encoding="utf-8",
     )
     (tmp_path / "Example.java").write_bytes(
-        b"class Example {\r\n"
-        b"    // production code\r\n"
-        b"}\r\n"
+        b"class Example {\r\n" b"    // production code\r\n" b"}\r\n"
     )
     (tmp_path / "ExampleTest.java").write_text(
         "class ExampleTest {}\n",
@@ -55,13 +56,14 @@ def test_collects_evidence_with_full_file_hash(tmp_path):
     )
 
     assert result.failure.test_name == "boundary"
-    assert result.production_code.content == (
-        "    // production code\r\n"
+    assert result.production_code.content == ("    // production code\r\n")
+    assert (
+        result.production_code.file_sha256
+        == sha256((tmp_path / "Example.java").read_bytes()).hexdigest()
     )
-    assert result.production_code.file_sha256 == sha256(
-        (tmp_path / "Example.java").read_bytes()
-    ).hexdigest()
-    assert result.test_code.content == "class ExampleTest {}\r\n"
+    assert result.test_code.content == (
+        tmp_path / "ExampleTest.java"
+    ).read_bytes().decode("utf-8")
 
 
 def test_rejects_missing_required_evidence(tmp_path):
@@ -89,7 +91,8 @@ def test_bounds_failure_message_and_marks_truncation(tmp_path):
 
     assert result.failure.message == "x" * 2_000
     assert result.failure.truncated is True
-    
+
+
 def test_binds_proposal_to_inspected_file_version(tmp_path):
     repository = prepare_repository(tmp_path)
     diagnosis = build_diagnosis_input(
@@ -117,9 +120,10 @@ def test_binds_proposal_to_inspected_file_version(tmp_path):
 
     assert request.relative_path == "Example.java"
     assert request.expected_sha256 == captured_hash
-    assert request.expected_sha256 != sha256(
-        (tmp_path / "Example.java").read_bytes()
-    ).hexdigest()
+    assert (
+        request.expected_sha256
+        != sha256((tmp_path / "Example.java").read_bytes()).hexdigest()
+    )
 
 
 def test_rejects_edit_outside_inspected_excerpt(tmp_path):
@@ -172,3 +176,31 @@ def test_rejects_ambiguous_edit_in_excerpt(tmp_path):
                 new_text="11",
             ),
         )
+
+
+def test_discovered_diagnosis_captures_target_hash(tmp_path):
+    production = "src/main/java/Example.java"
+    test = "src/test/java/ExampleTest.java"
+    for path, content in (
+        (production, "class Example { int calculate() { return 1; } }"),
+        (test, "class ExampleTest { Example service = new Example(); }"),
+        ("bug-report.md", "The result should be two."),
+    ):
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    diagnosis = build_discovered_diagnosis_input(
+        Repository(tmp_path), make_issue(), {production}
+    )
+    assert diagnosis.production_code.relative_path == production
+    assert diagnosis.test_code.relative_path == test
+    assert (
+        diagnosis.production_code.file_sha256
+        == sha256((tmp_path / production).read_bytes()).hexdigest()
+    )
+
+
+def test_missing_discovered_test_becomes_diagnosis_error(tmp_path):
+    (tmp_path / "src/main/java").mkdir(parents=True)
+    with pytest.raises(DiagnosisInputError, match="Incomplete"):
+        build_discovered_diagnosis_input(Repository(tmp_path), make_issue(), set())

@@ -19,9 +19,7 @@ def case_root(tmp_path):
     payload = {
         "production_path": production,
         "test_path": test,
-        "required_tests": [
-            {"class_name": "ExampleTest", "test_name": "boundary"}
-        ],
+        "required_tests": [{"class_name": "ExampleTest", "test_name": "boundary"}],
     }
     return tmp_path, payload
 
@@ -67,4 +65,23 @@ def test_rejects_duplicate_required_tests(case_root):
     write_case(root, payload)
 
     with pytest.raises(ValueError, match="unique"):
+        load_repair_case(root)
+
+
+def test_case_can_omit_target_paths(case_root):
+    root, payload = case_root
+    write_case(root, {"required_tests": payload["required_tests"]})
+    case = load_repair_case(root)
+    assert case.production_path is None
+    assert case.test_path is None
+    assert case.allowed_files == frozenset({"src/main/java/Example.java"})
+    assert case.required_tests[0].test_name == "boundary"
+
+
+@pytest.mark.parametrize("missing", ["production_path", "test_path"])
+def test_case_rejects_only_one_explicit_path(case_root, missing):
+    root, payload = case_root
+    del payload[missing]
+    write_case(root, payload)
+    with pytest.raises(ValueError, match="fields"):
         load_repair_case(root)

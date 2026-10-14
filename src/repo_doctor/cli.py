@@ -1,16 +1,16 @@
 import argparse
 from pathlib import Path
-from sqlite3 import adapters
 
 from repo_doctor.backend_selection import (
-    BACKEND_LABELS, 
-    Backend, 
-    BackendSelector, 
+    BACKEND_LABELS,
+    Backend,
+    BackendSelector,
     choose_number,
     load_selection,
     save_selection,
 )
 from repo_doctor.model_proposer import ModelProposer
+from repo_doctor.regression import ModelRegressionGenerator
 from repo_doctor.models_backend import (
     ClaudeAdapter,
     ClaudeBackendError,
@@ -18,7 +18,7 @@ from repo_doctor.models_backend import (
     CodexAdapter,
     ModelBackendError,
 )
-from repo_doctor.repair import RequiredTest, run_fixture_repair
+from repo_doctor.repair import RetryPolicy, run_fixture_repair
 from repo_doctor.tools.build import classify_test_run
 from repo_doctor.tools.workspace import create_fixture_workspace
 from repo_doctor.repair_reporting import save_repair_report
@@ -26,22 +26,14 @@ from repo_doctor.repair_case import load_repair_case
 from repo_doctor.benchmark import run_benchmark
 
 
-# PRODUCTION_PATH = (
-#     "src/main/java/com/example/discount/DiscountService.java"
-# )
-# TEST_PATH = (
-#     "src/test/java/com/example/discount/DiscountServiceTest.java"
-# )
-# REQUIRED_TEST = RequiredTest(
-#     class_name="com.example.discount.DiscountServiceTest",
-#     test_name="appliesDiscountAtThreshold",
-# )
-
-
 def run_selected_repair(
     selector: BackendSelector,
     fixture: Path,
+    *,
+    retry_policy: RetryPolicy | None = None,
+    generate_regression: bool = False,
 ) -> None:
+    policy = retry_policy if retry_policy is not None else RetryPolicy()
     selection = selector.selection
     transport = selector.transport
 
@@ -52,22 +44,36 @@ def run_selected_repair(
 
     workspace = create_fixture_workspace(fixture)
     print(f"\nWorkspace: {workspace.project_root}")
-    print(
-        f"Using {BACKEND_LABELS[selection.backend]} / "
-        f"{selection.model_id}"
-    )
+    print(f"Using {BACKEND_LABELS[selection.backend]} / " f"{selection.model_id}")
 
     result = run_fixture_repair(
         workspace,
         request=None,
-        allowed_files={case.production_path},
+        allowed_files=(
+            {case.production_path}
+            if case.production_path is not None
+            else set(case.allowed_files)
+        ),
         required_tests=case.required_tests,
         propose_fix=ModelProposer(transport),
+        **(
+            {"generate_regression": ModelRegressionGenerator(transport)}
+            if generate_regression
+            else {}
+        ),
         production_path=case.production_path,
         test_path=case.test_path,
+        retry_policy=policy,
     )
 
     print(f"\nRepair: {result.status.value}")
+    if getattr(result, "regression", None) is not None:
+        print(
+            "Regression reproduction:",
+            "accepted" if result.regression_accepted else "rejected",
+        )
+        print(f"Generated test: {result.regression.relative_path}")
+    print(f"Attempts: {len(result.attempts)}/{policy.max_attempts}")
     print(f"Baseline: {classify_test_run(result.baseline).value}")
     print(
         "Patch:",
@@ -97,9 +103,18 @@ def run_selected_repair(
         print(f"Saved report: {report_path}")
 
 
-def main() -> None:
+def positive_attempt_count(value: str) -> int:
+    try:
+        return RetryPolicy(max_attempts=int(value)).max_attempts
+    except (ValueError, TypeError) as error:
+        raise argparse.ArgumentTypeError(
+            "max-attempts must be a positive integer"
+        ) from error
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Repair the discount-service fixture."
+        description="Repair Java fixtures and run repair benchmarks."
     )
     parser.add_argument(
         "--fixture",
@@ -116,16 +131,33 @@ def main() -> None:
         type=Path,
         default=Path("benchmarks/results"),
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--max-attempts",
+        type=positive_attempt_count,
+        default=1,
+        help="Maximum total attempts per fixture (default: 1).",
+    )
+    parser.add_argument(
+        "--generate-regression",
+        action="store_true",
+        help="Require a generated numeric JUnit regression to fail before repair and pass afterward.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    policy = RetryPolicy(max_attempts=args.max_attempts)
 
     adapters = {
-    Backend.COPILOT: CopilotAdapter(),
-    Backend.CLAUDE: ClaudeAdapter(),
-    Backend.CODEX: CodexAdapter(),
+        Backend.COPILOT: CopilotAdapter(),
+        Backend.CLAUDE: ClaudeAdapter(),
+        Backend.CODEX: CodexAdapter(),
     }
     selector = BackendSelector(adapters)
 
     print("Repo Doctor")
+    print(f"Maximum attempts per fixture: {policy.max_attempts}")
     print("Available backends: GitHub Copilot, Claude, ChatGPT / Codex")
     print(
         "Running a repair sends diagnosis excerpts to the selected "
@@ -177,34 +209,46 @@ def main() -> None:
                     else:
                         selector.configure(switch_model_only=True)
                 elif action == 2:
-                    run_selected_repair(selector, args.fixture)
+                    run_selected_repair(
+                        selector,
+                        args.fixture,
+                        retry_policy=policy,
+                        **(
+                            {"generate_regression": True}
+                            if args.generate_regression
+                            else {}
+                        ),
+                    )
                 elif action == 3:
-                    if (
-                        selector.selection is None
-                        or selector.transport is None
-                    ):
+                    if selector.selection is None or selector.transport is None:
                         print("Choose a backend and model first.")
                     else:
-                        fixtures = tuple(sorted(
-                            path.parent
-                            for path in args.benchmark_root.glob(
-                                "*/repair-case.json"
+                        fixtures = tuple(
+                            sorted(
+                                path.parent
+                                for path in args.benchmark_root.glob(
+                                    "*/repair-case.json"
+                                )
                             )
-                        ))
+                        )
 
                         run_benchmark(
                             fixtures=fixtures,
                             selection=selector.selection,
                             transport=selector.transport,
                             output_root=args.results_root,
+                            retry_policy=policy,
+                            **(
+                                {"generate_regression": True}
+                                if args.generate_regression
+                                else {}
+                            ),
                         )
                 if action in (0, 1) and selector.selection is not None:
                     try:
                         save_selection(selector.selection)
                     except OSError:
-                        print(
-                            "Selection is active, but could not be saved."
-                        )
+                        print("Selection is active, but could not be saved.")
             except (ModelBackendError, ClaudeBackendError) as error:
                 print(f"Action failed: {error}")
             except Exception as error:

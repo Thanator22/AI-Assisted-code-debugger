@@ -8,7 +8,8 @@ from uuid import uuid4
 
 from repo_doctor.backend_selection import ModelSelection, Transport
 from repo_doctor.model_proposer import ModelProposer
-from repo_doctor.repair import run_fixture_repair
+from repo_doctor.regression import ModelRegressionGenerator
+from repo_doctor.repair import RetryPolicy, run_fixture_repair
 from repo_doctor.repair_case import load_repair_case
 from repo_doctor.repair_reporting import save_repair_report
 from repo_doctor.tools.workspace import create_fixture_workspace
@@ -22,13 +23,19 @@ class BenchmarkRow:
     workspace: str | None
     report_path: str | None
     diagnostic: str = ""
+    # None means no completed repair result was returned; the count is unknown.
+    attempt_count: int | None = None
 
 
 def benchmark_fixture(
     fixture: Path,
     selection: ModelSelection,
     transport: Transport,
+    *,
+    retry_policy: RetryPolicy | None = None,
+    generate_regression: bool = False,
 ) -> BenchmarkRow:
+    policy = retry_policy if retry_policy is not None else RetryPolicy()
     started = perf_counter()
     workspace = None
 
@@ -39,22 +46,28 @@ def benchmark_fixture(
         result = run_fixture_repair(
             workspace,
             request=None,
-            allowed_files={case.production_path},
+            allowed_files=(
+                {case.production_path}
+                if case.production_path is not None
+                else set(case.allowed_files)
+            ),
             required_tests=case.required_tests,
             propose_fix=ModelProposer(transport),
+            **(
+                {"generate_regression": ModelRegressionGenerator(transport)}
+                if generate_regression
+                else {}
+            ),
             production_path=case.production_path,
             test_path=case.test_path,
+            retry_policy=policy,
         )
     except Exception as error:
         return BenchmarkRow(
             fixture=str(fixture.resolve()),
             outcome="runner_error",
             duration_seconds=perf_counter() - started,
-            workspace=(
-                str(workspace.project_root)
-                if workspace is not None
-                else None
-            ),
+            workspace=(str(workspace.project_root) if workspace is not None else None),
             report_path=None,
             diagnostic=f"Attempt raised {type(error).__name__}",
         )
@@ -75,6 +88,7 @@ def benchmark_fixture(
         workspace=str(workspace.project_root),
         report_path=report_path,
         diagnostic=diagnostic,
+        attempt_count=len(result.attempts),
     )
 
 
@@ -83,11 +97,18 @@ def _write_summary(
     selection: ModelSelection,
     fixtures: tuple[Path, ...],
     rows: list[BenchmarkRow],
+    policy: RetryPolicy,
+    generate_regression: bool = False,
 ) -> None:
     verified = sum(row.outcome == "verified" for row in rows)
 
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "max_attempts": policy.max_attempts,
+        "regression_required": generate_regression,
+        "first_attempt_verified_count": sum(
+            row.outcome == "verified" and row.attempt_count == 1 for row in rows
+        ),
         "backend": selection.backend.value,
         "requested_model": selection.model_id,
         "planned_fixtures": [str(path.resolve()) for path in fixtures],
@@ -117,7 +138,10 @@ def run_benchmark(
     output_root: Path,
     *,
     write: Callable[[str], None] = print,
+    retry_policy: RetryPolicy | None = None,
+    generate_regression: bool = False,
 ) -> Path:
+    policy = retry_policy if retry_policy is not None else RetryPolicy()
     if not fixtures:
         raise ValueError("Specify at least one fixture")
 
@@ -131,20 +155,29 @@ def run_benchmark(
     summary_path = run_directory / "summary.json"
 
     rows: list[BenchmarkRow] = []
-    _write_summary(summary_path, selection, fixtures, rows)
+    _write_summary(summary_path, selection, fixtures, rows, policy, generate_regression)
 
     for fixture in fixtures:
         write(f"\nRunning: {fixture.name}")
 
-        row = benchmark_fixture(fixture, selection, transport)
+        row = benchmark_fixture(
+            fixture,
+            selection,
+            transport,
+            retry_policy=policy,
+            **({"generate_regression": True} if generate_regression else {}),
+        )
         rows.append(row)
 
-        # Checkpoint after every attempt, including failed attempts.
-        _write_summary(summary_path, selection, fixtures, rows)
+        # Checkpoint after every fixture, including failed repairs.
+        _write_summary(
+            summary_path, selection, fixtures, rows, policy, generate_regression
+        )
 
         write(
             f"{fixture.name}: {row.outcome} "
-            f"({row.duration_seconds:.1f}s)"
+            f"({row.duration_seconds:.1f}s; attempts: "
+            f"{row.attempt_count if row.attempt_count is not None else 'unknown'})"
         )
         if row.diagnostic:
             write(row.diagnostic)

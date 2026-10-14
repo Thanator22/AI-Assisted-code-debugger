@@ -29,7 +29,8 @@ class DiagnosisInput:
     bug_report: FileReadResult
     production_code: FileReadResult
     test_code: FileReadResult
-    
+
+
 @dataclass(frozen=True)
 class RepairProposal:
     explanation: str
@@ -47,18 +48,13 @@ def create_replacement_request(
 ) -> ReplacementRequest:
     source = diagnosis.production_code
 
-    if (
-        source.status is not FileReadStatus.SUCCESS
-        or source.file_sha256 is None
-    ):
+    if source.status is not FileReadStatus.SUCCESS or source.file_sha256 is None:
         raise ProposalValidationError(
             "Production code requires a successful read with a hash"
         )
 
     if not proposal.explanation.strip():
-        raise ProposalValidationError(
-            "Proposal must explain the change"
-        )
+        raise ProposalValidationError("Proposal must explain the change")
 
     if not proposal.old_text.strip():
         raise ProposalValidationError(
@@ -66,9 +62,7 @@ def create_replacement_request(
         )
 
     if proposal.old_text == proposal.new_text:
-        raise ProposalValidationError(
-            "Replacement must change the source text"
-        )
+        raise ProposalValidationError("Replacement must change the source text")
 
     first_match = source.content.find(proposal.old_text)
 
@@ -113,19 +107,14 @@ def build_diagnosis_input(
 
         if result.status is not FileReadStatus.SUCCESS:
             raise DiagnosisInputError(
-                f"Cannot read {path}: {result.status.value}; "
-                f"{result.diagnostic}"
+                f"Cannot read {path}: {result.status.value}; " f"{result.diagnostic}"
             )
 
         if result.file_sha256 is None:
-            raise DiagnosisInputError(
-                f"Read did not provide a file hash: {path}"
-            )
+            raise DiagnosisInputError(f"Read did not provide a file hash: {path}")
 
         if not result.content.strip():
-            raise DiagnosisInputError(
-                f"Requested excerpt contains no text: {path}"
-            )
+            raise DiagnosisInputError(f"Requested excerpt contains no text: {path}")
 
         return result
 
@@ -138,10 +127,7 @@ def build_diagnosis_input(
         issue.stack_trace,
     )
     limits = (500, 500, 2_000, 500, 6_000)
-    bounded = tuple(
-        value[:limit]
-        for value, limit in zip(fields, limits)
-    )
+    bounded = tuple(value[:limit] for value, limit in zip(fields, limits))
 
     failure = FailureEvidence(
         class_name=bounded[0],
@@ -149,10 +135,7 @@ def build_diagnosis_input(
         message=bounded[2],
         exception_type=bounded[3],
         stack_trace=bounded[4],
-        truncated=any(
-            len(value) > limit
-            for value, limit in zip(fields, limits)
-        ),
+        truncated=any(len(value) > limit for value, limit in zip(fields, limits)),
     )
 
     return DiagnosisInput(
@@ -168,4 +151,21 @@ def build_diagnosis_input(
             test_start_line,
             test_end_line,
         ),
+    )
+
+
+def build_discovered_diagnosis_input(
+    repository: Repository,
+    issue: TestIssue,
+    allowed_files: set[str],
+) -> DiagnosisInput:
+    """Discover an approved target, then capture fresh hashed evidence."""
+    from repo_doctor.discovery import DiscoveryError, discover_repair_target
+
+    try:
+        discovery = discover_repair_target(repository, issue, allowed_files)
+    except DiscoveryError as error:
+        raise DiagnosisInputError(str(error)) from error
+    return build_diagnosis_input(
+        repository, issue, discovery.production_path, discovery.test_path
     )
